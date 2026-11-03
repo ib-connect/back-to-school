@@ -20,8 +20,10 @@
   #stage { flex: 1; display: flex; align-items: center; justify-content: center;
     padding: 16px; min-height: 0; }
   #wrap { width: 100%; }
-  #book { margin: 0 auto; }
-  #book .page img, .stf__item img { width: 100%; height: 100%; object-fit: contain; display: block; }
+   #book { margin: 0 auto; transition: transform .6s ease; }
+  #book .page { background: #fff; overflow: hidden; }
+  #book .page img { width: 100%; height: 100%; object-fit: cover; display: block;
+    user-select: none; pointer-events: none; }
 
   #loader { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 12px;
     align-items: center; justify-content: center; background: var(--bg); z-index: 10; }
@@ -113,7 +115,17 @@ function loadImage(src) {
     img.src = src;
   });
 }
-
+function centerSingle() {
+  if (!flip) return;
+  const i = flip.getCurrentPageIndex();
+  const total = flip.getPageCount();
+  let shift = 0;
+  if (flip.getOrientation() === 'landscape' && CONFIG.showCover) {
+    if (i === 0) shift = -25;
+    else if (i === total - 1 && total % 2 === 0) shift = 25;
+  }
+  $('book').style.transform = `translateX(${shift}%)`;
+}
 async function pagesFromPdf(url) {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -232,14 +244,29 @@ async function init() {
       maxShadowOpacity: 0.5,
       flippingTime: 700,
     });
-    flip.loadFromImages(data.urls);
+    const pages = data.urls.map((src, i) => {
+      const page = document.createElement('div');
+      page.className = 'page';
+      if (CONFIG.showCover && i === 0) page.dataset.density = 'hard';
+      const img = document.createElement('img');
+      img.src = src;
+      img.draggable = false;
+      img.alt = 'Страница ' + (i + 1);
+      page.appendChild(img);
+      return page;
+    });
+    flip.loadFromHTML(pages);
 
-    flip.on('flip', updateCounter);
-    flip.on('changeOrientation', updateCounter);
+    flip.on('flip', () => { updateCounter(); centerSingle(); });
+    flip.on('changeOrientation', () => { updateCounter(); centerSingle(); });
+    flip.on('changeState', e => {
+      if (e.data === 'flipping' || e.data === 'user_fold') $('book').style.transform = 'translateX(0)';
+      if (e.data === 'read') centerSingle();
+    });
 
     const m = location.hash.match(/^#p(\d+)$/);
     if (m) flip.turnToPage(Math.max(0, Math.min(+m[1] - 1, data.urls.length - 1)));
-    updateCounter();
+      centerSingle();
 
     if (CONFIG.pdf && CONFIG.showDownload) {
       $('download').href = CONFIG.pdf;
