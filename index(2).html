@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Книжка</title>
+<style>
+  :root {
+    --bg: #1d1f24;
+    --bar: #2a2d34;
+    --text: #e9e9ec;
+    --muted: #9a9ca4;
+    --accent: #ffb547;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 16px; min-height: 0; }
+  #wrap { width: 100%; }
+  #book { margin: 0 auto; }
+  #book .page img, .stf__item img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+  #loader { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 12px;
+    align-items: center; justify-content: center; background: var(--bg); z-index: 10; }
+  #loader .bar { width: 220px; height: 4px; background: var(--bar); border-radius: 2px; overflow: hidden; }
+  #loader .fill { width: 0; height: 100%; background: var(--accent); transition: width .2s; }
+  #loader small { color: var(--muted); }
+
+  nav { display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 16px; background: var(--bar); }
+  nav button, nav a { background: transparent; color: var(--text); border: 1px solid #44474f;
+    border-radius: 8px; height: 36px; min-width: 40px; padding: 0 12px; font-size: 18px;
+    cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+  nav button:hover, nav a:hover { border-color: var(--accent); color: var(--accent); }
+  nav a { font-size: 13px; }
+  #counter { min-width: 90px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="loader">
+  <div>Загружаю книжку…</div>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <small id="status"></small>
+</div>
+
+<main id="stage"><div id="wrap"><div id="book"></div></div></main>
+
+<nav>
+  <button id="prev" title="Назад (←)">‹</button>
+  <span id="counter">– / –</span>
+  <button id="next" title="Вперед (→)">›</button>
+  <button id="fs" title="Во весь экран">⛶</button>
+  <a id="download" class="hidden" download>Скачать PDF</a>
+</nav>
+
+<script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+/* ================== НАСТРОЙКИ ================== */
+const CONFIG = {
+  // Вариант 1: PDF. Положите файл рядом с index.html.
+  // Оставьте пустую строку '', если листаете картинки.
+  pdf: '',
+
+  // Вариант 2: картинки. Используется, если pdf = ''.
+  // Либо явный список файлов:
+  list: [],            // например ['pages/cover.png', 'pages/1.png', ...]
+  // Либо автоматический перебор: pages/1.png, pages/2.png, ... до первого пропуска
+  folder: 'pages/',
+  ext: 'png',
+  pad: 0,              // 3 → имена 001.png, 002.png
+  start: 0,            // с какого номера начинать (если 0.png нет, начнет с 1.png)
+  max: 500,
+
+  // Сканы-развороты: каждый скан режется пополам на левую и правую страницу.
+  //   'auto' — режутся только горизонтальные сканы (шире, чем выше),
+  //            вертикальные (например, обложка) остаются целыми;
+  //   true   — резать все сканы; false — ничего не резать.
+  spreads: 'auto',
+  gutterCrop: 0,       // сколько % ширины срезать у корешка с каждой половины (0–5)
+  rtl: false,          // true — для книг справа налево (правая половина идет первой)
+
+  // Обложка: 'auto' — если первая картинка вертикальная (отдельная обложка),
+  // она показывается одна; если первая картинка — разворот, книга сразу
+  // открывается разворотом, без пустой половины. true / false — вручную.
+  showCover: 'auto',
+  pdfWidth: 1400,      // ширина рендера одной страницы PDF в пикселях (качество)
+  showDownload: true,  // кнопка «Скачать PDF»
+};
+// Можно открыть другую книгу без правки кода: ?book=other.pdf или ?folder=other/
+/* =============================================== */
+
+const params = new URLSearchParams(location.search);
+if (params.get('book'))   { CONFIG.pdf = params.get('book'); }
+if (params.get('folder')) { CONFIG.pdf = ''; CONFIG.folder = params.get('folder'); }
+
+const $ = id => document.getElementById(id);
+const setProgress = (done, total, text) => {
+  if (total) $('fill').style.width = Math.round(done / total * 100) + '%';
+  $('status').textContent = text || (total ? `${done} из ${total}` : `${done}`);
+};
+
+function loadImage(src) {
+  return new Promise((ok, fail) => {
+    const img = new Image();
+    img.onload = () => ok(img);
+    img.onerror = () => fail(new Error('Нет файла ' + src));
+    img.src = src;
+  });
+}
+
+async function pagesFromPdf(url) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf = await pdfjsLib.getDocument(url).promise;
+  const urls = [];
+  let ratio = 1.414;
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const base = page.getViewport({ scale: 1 });
+    if (i === 1) ratio = base.height / base.width;
+    // разворот рендерим в два раза шире, чтобы каждая половина была четкой
+    const wide = CONFIG.spreads && base.width > base.height;
+    const vp = page.getViewport({ scale: CONFIG.pdfWidth * (wide ? 2 : 1) / base.width });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    urls.push(canvas.toDataURL('image/jpeg', 0.88));
+    setProgress(i, pdf.numPages);
+  }
+  return { urls, ratio };
+}
+
+async function pagesFromImages() {
+  let urls = CONFIG.list.slice();
+  if (!urls.length) {
+    for (let n = CONFIG.start; n < CONFIG.start + CONFIG.max; n++) {
+      const src = CONFIG.folder + String(n).padStart(CONFIG.pad, '0') + '.' + CONFIG.ext;
+      try { await loadImage(src); urls.push(src); setProgress(urls.length, 0, `найдено страниц: ${urls.length}`); }
+      catch {
+        if (urls.length || n > CONFIG.start) break; // первый номер можно пропустить (0 или 1)
+      }
+    }
+  }
+  if (!urls.length) throw new Error('Не нашла картинок в ' + CONFIG.folder);
+  const first = await loadImage(urls[0]);
+  return { urls, ratio: first.naturalHeight / first.naturalWidth };
+}
+
+// Режем сканы-развороты на две страницы
+async function splitSpreads(data) {
+  if (!CONFIG.spreads) return data;
+  const out = [];
+  let pageRatio = null;
+  const total = data.urls.length;
+  for (let i = 0; i < total; i++) {
+    const img = await loadImage(data.urls[i]);
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const isSpread = CONFIG.spreads === true || w > h;
+    if (i === 0) data.firstSingle = !isSpread;
+    if (!isSpread) {
+      out.push(data.urls[i]);
+    } else {
+      const half = Math.floor(w / 2);
+      const crop = Math.round(half * CONFIG.gutterCrop / 100);
+      const pw = half - crop;
+      // левая половина: обрезаем справа (у корешка); правая: обрезаем слева
+      const parts = [[0, pw], [half + crop, pw]];
+      if (CONFIG.rtl) parts.reverse();
+      for (const [sx, sw] of parts) {
+        const c = document.createElement('canvas');
+        c.width = sw; c.height = h;
+        c.getContext('2d').drawImage(img, sx, 0, sw, h, 0, 0, sw, h);
+        out.push(c.toDataURL('image/jpeg', 0.9));
+      }
+      if (!pageRatio) pageRatio = h / pw;
+    }
+    setProgress(i + 1, total, `делю развороты: ${i + 1} из ${total}`);
+  }
+  return { urls: out, ratio: pageRatio || data.ratio, firstSingle: data.firstSingle };
+}
+
+let flip, ratio;
+
+// Подгоняем ширину книги так, чтобы она влезала в экран по высоте
+function fitBook() {
+  const stage = $('stage');
+  const availW = stage.clientWidth - 32;
+  const availH = stage.clientHeight - 32;
+  const pagesAcross = availW < availH ? 1 : 2; // вертикальный экран — по одной странице
+  const w = Math.min(availW, availH / ratio * pagesAcross);
+  $('wrap').style.maxWidth = Math.floor(w) + 'px';
+}
+
+function updateCounter() {
+  const total = flip.getPageCount();
+  const i = flip.getCurrentPageIndex();
+  const twoUp = flip.getOrientation() === 'landscape';
+  let label = String(i + 1);
+  if (twoUp && i + 1 < total && !(CONFIG.showCover && i === 0)) label += '–' + (i + 2);
+  $('counter').textContent = `${label} / ${total}`;
+  history.replaceState(null, '', '#p' + (i + 1));
+}
+
+async function init() {
+  try {
+    let data = CONFIG.pdf ? await pagesFromPdf(CONFIG.pdf) : await pagesFromImages();
+    data = await splitSpreads(data);
+    if (CONFIG.showCover === 'auto') CONFIG.showCover = data.firstSingle !== false;
+    ratio = data.ratio;
+    fitBook();
+
+    const baseW = 600;
+    flip = new St.PageFlip($('book'), {
+      width: baseW,
+      height: Math.round(baseW * ratio),
+      size: 'stretch',
+      minWidth: 150, maxWidth: 3000,
+      minHeight: 150, maxHeight: 4000,
+      showCover: CONFIG.showCover,
+      usePortrait: true,
+      mobileScrollSupport: false,
+      maxShadowOpacity: 0.5,
+      flippingTime: 700,
+    });
+    flip.loadFromImages(data.urls);
+
+    flip.on('flip', updateCounter);
+    flip.on('changeOrientation', updateCounter);
+
+    const m = location.hash.match(/^#p(\d+)$/);
+    if (m) flip.turnToPage(Math.max(0, Math.min(+m[1] - 1, data.urls.length - 1)));
+    updateCounter();
+
+    if (CONFIG.pdf && CONFIG.showDownload) {
+      $('download').href = CONFIG.pdf;
+      $('download').classList.remove('hidden');
+    }
+    $('loader').classList.add('hidden');
+  } catch (e) {
+    console.error(e);
+    $('status').textContent = 'Ошибка: ' + e.message;
+  }
+}
+
+$('prev').onclick = () => flip && flip.flipPrev();
+$('next').onclick = () => flip && flip.flipNext();
+$('fs').onclick = () => document.fullscreenElement
+  ? document.exitFullscreen()
+  : document.documentElement.requestFullscreen();
+document.addEventListener('keydown', e => {
+  if (!flip) return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') flip.flipNext();
+  if (e.key === 'ArrowLeft'  || e.key === 'PageUp')   flip.flipPrev();
+});
+window.addEventListener('resize', () => { if (ratio) fitBook(); });
+
+init();
+</script>
+</body>
+</html>
